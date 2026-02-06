@@ -1,0 +1,16 @@
+diffusers[torch]
+transformers
+accelerate
+gradio
+sentencepiece
+protobuf
+bitsandbytes
+psutil
+einops
+torchao
+scipy
+scikit-image
+image-reward
+lpips
+fastapi
+uvicorn
