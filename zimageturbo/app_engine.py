@@ -126,18 +126,18 @@ LITE_CONFIG = {
 # --- Resolution Presets ---
 RESOLUTION_1MP = {
     "1:1 (Square)": (1024, 1024),
-    "3:2 (Landscape)": (1216, 832),
-    "2:3 (Portrait)": (832, 1216),
-    "4:3 (Classic)": (1152, 896),
-    "16:9 (Widescreen)": (1344, 768),
-    "21:9 (Ultrawide)": (1536, 640),
+    "3:2 (Landscape)": (832, 1216),
+    "2:3 (Portrait)": (1216, 832),
+    "4:3 (Classic)": (896, 1152),
+    "16:9 (Widescreen)": (768, 1344),
+    "21:9 (Ultrawide)": (640, 1536),
 }
 
 RESOLUTION_2MP = {
     "1:1 (Square)": (1408, 1408),
-    "3:2 (Landscape)": (1728, 1152),
-    "4:3 (Classic)": (1664, 1216),
-    "16:9 (Widescreen)": (1920, 1088),
+    "3:2 (Landscape)": (1152, 1728),
+    "4:3 (Classic)": (1216, 1664),
+    "16:9 (Widescreen)": (1088, 1920),
 }
 
 # --- ControlNet Types ---
@@ -638,6 +638,60 @@ class ModelManager:
                 "guidance_scale": 0.0,
                 "generator": generator,
             }
+
+            # --- Inpainting: noise-level masking via callback ---
+            # ZImagePipeline is text-to-image only. For inpainting we must
+            # blend the denoised latent with the noised original at each step
+            # so non-masked areas converge to the original image.
+            if image is not None and mask_image is not None:
+                import torch.nn.functional as F
+                weight_dtype = torch.bfloat16
+                device = "cuda"
+
+                # Encode original image to latent
+                img_tensor = preprocess_image(image, (height, width))
+                img_tensor = (img_tensor * 2.0 - 1.0).to(dtype=weight_dtype, device=device)
+                original_latent = self.vae.encode(img_tensor).latent_dist.mode()
+                original_latent = (
+                    (original_latent - self.vae.config.shift_factor)
+                    * self.vae.config.scaling_factor
+                ).float()
+
+                # Mask in latent space (white=1=regenerate, black=0=keep)
+                mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
+                lat_h, lat_w = original_latent.shape[2], original_latent.shape[3]
+                mask_latent = F.interpolate(mask_t, size=(lat_h, lat_w), mode='nearest')
+                mask_latent = mask_latent.to(device=device, dtype=torch.float32)
+
+                # Generate initial noise (same shape, same generator for reproducibility)
+                initial_noise = torch.randn(
+                    original_latent.shape, generator=generator, device=device, dtype=torch.float32
+                )
+                gen_kwargs["latents"] = initial_noise
+
+                # Callback: blend at each denoising step
+                def _inpaint_callback(pipe, step_index, timestep, callback_kwargs):
+                    latents = callback_kwargs["latents"]
+                    # sigma after this step (0.0 at final step = clean image)
+                    next_idx = step_index + 1
+                    if next_idx < len(pipe.scheduler.sigmas):
+                        sigma = pipe.scheduler.sigmas[next_idx].item()
+                    else:
+                        sigma = 0.0
+                    # Original at current noise level: x_t = sigma*noise + (1-sigma)*x_0
+                    noised_orig = (
+                        sigma * initial_noise + (1.0 - sigma) * original_latent
+                    )
+                    # mask=1 → use denoised (regenerate), mask=0 → use original (keep)
+                    callback_kwargs["latents"] = (
+                        mask_latent * latents + (1.0 - mask_latent) * noised_orig
+                    )
+                    return callback_kwargs
+
+                gen_kwargs["callback_on_step_end"] = _inpaint_callback
+                gen_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
+                print(f"    Inpainting active: mask→latent {mask_latent.shape}, "
+                      f"original_latent {original_latent.shape}")
 
             try:
                 result = self.pipe(**gen_kwargs)
