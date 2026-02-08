@@ -33,8 +33,77 @@ except ImportError as e:
 from diffusers import FlowMatchEulerDiscreteScheduler, AutoencoderKL, ZImageTransformer2DModel
 from diffusers import ZImagePipeline
 from diffusers import FlowMatchLCMScheduler
+from diffusers.schedulers.scheduling_utils import SchedulerOutput
 from transformers import AutoTokenizer
 from safetensors.torch import load_file as load_safetensors
+
+
+class ResMultistepFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
+    """
+    2nd-order multistep scheduler for flow matching (res_multistep).
+    Based on ComfyUI's exponential integrator with phi functions.
+    Uses previous model output for 2nd-order correction (no extra model calls).
+    """
+
+    def set_timesteps(self, num_inference_steps, device=None, **kwargs):
+        super().set_timesteps(num_inference_steps, device=device, **kwargs)
+        self._old_denoised = None
+        self._old_t = None
+
+    def step(self, model_output, timestep, sample, s_churn=0.0, s_tmin=0.0,
+             s_tmax=float("inf"), s_noise=1.0, generator=None,
+             return_dict=True):
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        sigma = self.sigmas[self.step_index]
+        sigma_next = self.sigmas[self.step_index + 1]
+
+        # x0 prediction from velocity: x0 = sample - sigma * v
+        denoised = sample - sigma * model_output
+
+        eps = 1e-8
+        if sigma_next < eps:
+            # Last step: jump directly to denoised
+            prev_sample = denoised
+        elif self._old_denoised is None:
+            # First step: Euler
+            prev_sample = sample + (sigma_next - sigma) * model_output
+        else:
+            # 2nd order exponential integrator (res_multistep)
+            t_fn = lambda s: -torch.log(torch.clamp(s, min=eps))
+            sigma_fn = lambda t: torch.exp(-t)
+
+            t_cur = t_fn(sigma)
+            t_next = t_fn(sigma_next)
+            t_old = self._old_t
+            h = t_next - t_cur
+
+            # phi functions for exponential integrator
+            def phi1(t):
+                return torch.where(t.abs() < 1e-5,
+                                   1.0 + 0.5 * t,
+                                   (torch.exp(t) - 1.0) / t)
+
+            def phi2(t):
+                return torch.where(t.abs() < 1e-5,
+                                   0.5 + t / 6.0,
+                                   (phi1(t) - 1.0) / t)
+
+            c2 = (t_next - t_old) / h
+            b1 = phi1(-h) - phi2(-h) / c2
+            b2 = phi2(-h) / c2
+
+            prev_sample = (sigma_fn(t_next) / sigma_fn(t_cur)) * sample \
+                - sigma_fn(t_next) * (b1 * denoised + b2 * self._old_denoised)
+
+        self._old_denoised = denoised
+        self._old_t = -torch.log(torch.clamp(sigma_next, min=eps))
+        self._step_index += 1
+
+        if not return_dict:
+            return (prev_sample,)
+        return SchedulerOutput(prev_sample=prev_sample)
 
 
 def _convert_z_image_state_dict(state_dict):
@@ -219,7 +288,9 @@ class ModelManager:
             return {"status": "error", "message": "No model loaded"}
 
         scheduler_dir = os.path.join(Z_IMAGE_ROOT, "scheduler")
-        if scheduler_type == "Euler":
+        if scheduler_type == "res_multistep":
+            self.pipe.scheduler = ResMultistepFlowMatchScheduler.from_pretrained(scheduler_dir)
+        elif scheduler_type == "Euler":
             self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(scheduler_dir)
         elif scheduler_type == "Euler + Beta":
             self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
@@ -380,14 +451,16 @@ class ModelManager:
 
         # For models with additional_in_dim > 0 (Union): [ctrl(16), mask(1), inpaint(16)] = 33ch
         if self._control_module and self._control_module.additional_in_dim > 0:
-            # Prepare inpaint image
+            # Prepare inpaint image (ComfyUI convention):
+            #   mask_keep = round(1 - mask): 1=keep, 0=regenerate
+            #   inpaint = (image - 0.5) * mask_keep + 0.5
+            #   → keeps original in preserved areas, fills gray in regenerate areas
             if inpaint_image is not None:
                 inp_tensor = preprocess_image(inpaint_image, (height, width))  # [0,1]
-                # Apply mask: white=regenerate -> neutral, black=keep -> original
                 if mask_image is not None:
                     mask_t = preprocess_mask(mask_image, (height, width)) / 255.0  # [0,1]
-                    mask_inv = 1.0 - mask_t  # 0=regenerate, 1=keep
-                    inp_tensor = (inp_tensor - 0.5) * mask_inv + 0.5
+                    mask_keep = (1.0 - mask_t).round()
+                    inp_tensor = (inp_tensor - 0.5) * mask_keep + 0.5
             else:
                 # Dummy neutral gray inpaint image
                 inp_tensor = torch.full([1, 3, height, width], 0.5)
@@ -397,12 +470,11 @@ class ModelManager:
                 inp_latent = self.vae.encode(inp_tensor).latent_dist.mode()
                 inp_latent = (inp_latent - self.vae.config.shift_factor) * self.vae.config.scaling_factor
 
-            # Mask channel (downsampled to latent resolution)
+            # Mask channel: inverted (1=keep, 0=regenerate), nearest to latent res
             if mask_image is not None:
                 mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
-                mask_inv = 1.0 - mask_t
                 mask_latent = F.interpolate(
-                    mask_inv, size=(ctrl_latent.shape[2], ctrl_latent.shape[3]), mode='nearest'
+                    1.0 - mask_t, size=(ctrl_latent.shape[2], ctrl_latent.shape[3]), mode='nearest'
                 )
             else:
                 mask_latent = torch.zeros([1, 1, ctrl_latent.shape[2], ctrl_latent.shape[3]])
@@ -540,7 +612,7 @@ class ModelManager:
                 # --- 5. Load Scheduler ---
                 _progress(0.7, "Scheduler 로딩")
                 scheduler_dir = os.path.join(Z_IMAGE_ROOT, "scheduler")
-                self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(scheduler_dir)
+                self.scheduler = ResMultistepFlowMatchScheduler.from_pretrained(scheduler_dir)
 
                 # --- 6. Assemble Pipeline ---
                 _progress(0.75, "Pipeline 조립")
@@ -635,20 +707,22 @@ class ModelManager:
                 "height": height,
                 "width": width,
                 "num_inference_steps": steps,
-                "guidance_scale": 0.0,
+                "guidance_scale": 1.0,
                 "generator": generator,
             }
 
-            # --- Inpainting: noise-level masking via callback ---
-            # ZImagePipeline is text-to-image only. For inpainting we must
-            # blend the denoised latent with the noised original at each step
-            # so non-masked areas converge to the original image.
-            if image is not None and mask_image is not None:
+            # --- Inpainting ---
+            # When ControlNet is active: 33ch input already carries mask+inpaint info,
+            # the model handles inpainting natively. No callback needed.
+            # When ControlNet is NOT active: use noise-level masking callback (RePaint).
+            use_controlnet = (self._control_module is not None
+                              and self._control_module._active)
+
+            if image is not None and mask_image is not None and not use_controlnet:
                 import torch.nn.functional as F
                 weight_dtype = torch.bfloat16
                 device = "cuda"
 
-                # Encode original image to latent
                 img_tensor = preprocess_image(image, (height, width))
                 img_tensor = (img_tensor * 2.0 - 1.0).to(dtype=weight_dtype, device=device)
                 original_latent = self.vae.encode(img_tensor).latent_dist.mode()
@@ -657,32 +731,24 @@ class ModelManager:
                     * self.vae.config.scaling_factor
                 ).float()
 
-                # Mask in latent space (white=1=regenerate, black=0=keep)
                 mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
                 lat_h, lat_w = original_latent.shape[2], original_latent.shape[3]
                 mask_latent = F.interpolate(mask_t, size=(lat_h, lat_w), mode='nearest')
                 mask_latent = mask_latent.to(device=device, dtype=torch.float32)
 
-                # Generate initial noise (same shape, same generator for reproducibility)
                 initial_noise = torch.randn(
                     original_latent.shape, generator=generator, device=device, dtype=torch.float32
                 )
                 gen_kwargs["latents"] = initial_noise
 
-                # Callback: blend at each denoising step
                 def _inpaint_callback(pipe, step_index, timestep, callback_kwargs):
                     latents = callback_kwargs["latents"]
-                    # sigma after this step (0.0 at final step = clean image)
                     next_idx = step_index + 1
                     if next_idx < len(pipe.scheduler.sigmas):
                         sigma = pipe.scheduler.sigmas[next_idx].item()
                     else:
                         sigma = 0.0
-                    # Original at current noise level: x_t = sigma*noise + (1-sigma)*x_0
-                    noised_orig = (
-                        sigma * initial_noise + (1.0 - sigma) * original_latent
-                    )
-                    # mask=1 → use denoised (regenerate), mask=0 → use original (keep)
+                    noised_orig = sigma * initial_noise + (1.0 - sigma) * original_latent
                     callback_kwargs["latents"] = (
                         mask_latent * latents + (1.0 - mask_latent) * noised_orig
                     )
@@ -690,8 +756,7 @@ class ModelManager:
 
                 gen_kwargs["callback_on_step_end"] = _inpaint_callback
                 gen_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
-                print(f"    Inpainting active: mask→latent {mask_latent.shape}, "
-                      f"original_latent {original_latent.shape}")
+                print(f"    Inpainting (RePaint callback): mask {mask_latent.shape}")
 
             try:
                 result = self.pipe(**gen_kwargs)
@@ -795,9 +860,9 @@ def gradio_interface():
                         # Generation Settings
                         gr.Markdown("### ⚙️ Settings")
                         scheduler_dropdown = gr.Dropdown(
-                            choices=["Euler", "Euler + Beta", "LCM", "LCM + Beta"],
-                            value="Euler",
-                            label="Scheduler (LCM+Beta 권장 시도)"
+                            choices=["res_multistep", "Euler", "Euler + Beta", "LCM", "LCM + Beta"],
+                            value="res_multistep",
+                            label="Sampler"
                         )
                         steps_slider = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Steps (8 권장)")
                         seed_input = gr.Number(value=-1, label="Seed (-1 = random)", precision=0)
@@ -900,7 +965,7 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("  🚀 Z-Image Turbo Engine Starting...")
     print("  📌 Access URL: http://localhost:7860")
-    print("  ⚡ 8-step distilled | CFG=0.0 | No negative prompt")
+    print("  ⚡ 8-step distilled | CFG=1.0 | shift=3.0 | res_multistep")
     print("  🎛️ ControlNet Union/Tile, LoRA, Resolution Presets")
     print("  📁 ControlNet 위치: models/Personalized_Model/")
     print("="*60 + "\n")
