@@ -202,6 +202,7 @@ def detect_controlnet_config(state_dict):
 def load_controlnet_module(controlnet_path, device='cpu', dtype=torch.bfloat16):
     """Load ControlNet weights into standalone ZImageControlModule."""
     from safetensors.torch import load_file as load_safetensors
+    from accelerate import init_empty_weights
 
     sd = load_safetensors(controlnet_path)
     config = detect_controlnet_config(sd)
@@ -210,8 +211,10 @@ def load_controlnet_module(controlnet_path, device='cpu', dtype=torch.bfloat16):
           f"additional_in_dim={config['additional_in_dim']}, "
           f"refiner={config['refiner_control']}, broken={config['broken']}")
 
-    module = ZImageControlModule(**config)
-    missing, unexpected = module.load_state_dict(sd, strict=False)
+    # Meta-device init avoids fp32 allocation; assign=True fills with actual tensors
+    with init_empty_weights():
+        module = ZImageControlModule(**config)
+    missing, unexpected = module.load_state_dict(sd, strict=False, assign=True)
 
     if missing:
         print(f"    Missing keys: {len(missing)} (first 5: {missing[:5]})")
@@ -220,7 +223,8 @@ def load_controlnet_module(controlnet_path, device='cpu', dtype=torch.bfloat16):
     if not missing and not unexpected:
         print(f"    All {len(sd)} control keys loaded perfectly")
 
-    module = module.to(dtype).to(device)
+    del sd
+    module = module.to(dtype=dtype, device=device)
     return module
 
 

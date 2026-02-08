@@ -36,6 +36,7 @@ from diffusers import FlowMatchLCMScheduler
 from diffusers.schedulers.scheduling_utils import SchedulerOutput
 from transformers import AutoTokenizer
 from safetensors.torch import load_file as load_safetensors
+from accelerate import init_empty_weights
 
 
 class ResMultistepFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
@@ -253,15 +254,32 @@ class ModelManager:
         self.current_model_type = None
         self.lock = threading.Lock()
         self.controlnet_loaded = None
-        self.loaded_loras = set()  # Track loaded adapter names
-        self.transformer = None
-        self.vae = None
-        self.text_encoder = None
-        self.tokenizer = None
-        self.scheduler = None
+        self.loaded_loras = set()
         self.config = None
         self._transformer_choice = None
-        self._control_module = None  # Standalone ControlNet module (hook-based)
+        self._control_module = None
+
+    # Access components via pipe to avoid duplicate references holding RAM
+    @property
+    def transformer(self):
+        return self.pipe.transformer if self.pipe else None
+
+    @property
+    def vae(self):
+        return self.pipe.vae if self.pipe else None
+
+    @property
+    def text_encoder(self):
+        return self.pipe.text_encoder if self.pipe else None
+
+    @property
+    def scheduler(self):
+        return self.pipe.scheduler if self.pipe else None
+
+    @scheduler.setter
+    def scheduler(self, value):
+        if self.pipe:
+            self.pipe.scheduler = value
 
     def get_status(self):
         ram_percent = psutil.virtual_memory().percent
@@ -304,22 +322,11 @@ class ModelManager:
             self.pipe.scheduler = FlowMatchLCMScheduler(
                 num_train_timesteps=1000, shift=3.0, use_beta_sigmas=True
             )
-        self.scheduler = self.pipe.scheduler
         print(f"    Scheduler changed to: {scheduler_type}")
         return {"status": "success", "scheduler": scheduler_type}
 
     def unload_model(self):
-        if self.pipe:
-            print(f"🧹 Unloading {self.current_model_type}...")
-            if cache_dit:
-                try:
-                    cache_dit.disable_cache(self.pipe)
-                except:
-                    pass
-            del self.pipe
-            self.pipe = None
-        
-        # Clean up ControlNet hooks/module
+        # Clean up ControlNet hooks before deleting pipe
         if self._control_module is not None:
             from zimage_control import remove_control_hooks
             if self.transformer is not None:
@@ -330,10 +337,15 @@ class ModelManager:
             del self._control_module
             self._control_module = None
 
-        for attr in ['transformer', 'vae', 'text_encoder', 'tokenizer', 'scheduler']:
-            if hasattr(self, attr) and getattr(self, attr) is not None:
-                delattr(self, attr)
-                setattr(self, attr, None)
+        if self.pipe:
+            print(f"🧹 Unloading {self.current_model_type}...")
+            if cache_dit:
+                try:
+                    cache_dit.disable_cache(self.pipe)
+                except:
+                    pass
+            del self.pipe
+            self.pipe = None
 
         self.current_model_type = None
         self.controlnet_loaded = None
@@ -579,8 +591,12 @@ class ModelManager:
                     raw_state_dict = _convert_z_image_state_dict(raw_state_dict)
 
                 tf_config = ZImageTransformer2DModel.load_config(transformer_config_dir)
-                self.transformer = ZImageTransformer2DModel.from_config(tf_config)
-                missing, unexpected = self.transformer.load_state_dict(raw_state_dict, strict=False)
+                # Meta-device init: zero memory allocation, then assign bf16 tensors directly
+                with init_empty_weights():
+                    _transformer = ZImageTransformer2DModel.from_config(tf_config)
+                missing, unexpected = _transformer.load_state_dict(
+                    raw_state_dict, strict=False, assign=True
+                )
                 del raw_state_dict
                 gc.collect()
 
@@ -591,41 +607,45 @@ class ModelManager:
                 if not missing and not unexpected:
                     print(f"    ✅ All transformer weights loaded perfectly")
 
-                self.transformer = self.transformer.to(weight_dtype)
+                _transformer.to(device="cuda")
+                gc.collect()
 
-                # --- 2. Load VAE ---
+                # --- 2. Load VAE → GPU directly ---
                 _progress(0.3, "VAE 로딩")
-                self.vae = AutoencoderKL.from_pretrained(VAE_ROOT, torch_dtype=weight_dtype)
+                _vae = AutoencoderKL.from_pretrained(
+                    VAE_ROOT, torch_dtype=weight_dtype, device_map="cuda"
+                )
+                gc.collect()
 
-                # --- 3. Load Text Encoder (Qwen3ForCausalLM per reference) ---
+                # --- 3. Load Text Encoder → GPU directly ---
                 _progress(0.5, "Text Encoder 로딩")
                 from transformers import Qwen3ForCausalLM
-                self.text_encoder = Qwen3ForCausalLM.from_pretrained(
-                    TE_ROOT, torch_dtype=weight_dtype, low_cpu_mem_usage=True
+                _text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    TE_ROOT, torch_dtype=weight_dtype, device_map="cuda"
                 )
+                gc.collect()
                 print(f"    ✅ Text encoder loaded as Qwen3ForCausalLM")
 
                 # --- 4. Load Tokenizer ---
                 _progress(0.65, "Tokenizer 로딩")
-                self.tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ROOT)
+                _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ROOT)
 
                 # --- 5. Load Scheduler ---
                 _progress(0.7, "Scheduler 로딩")
                 scheduler_dir = os.path.join(Z_IMAGE_ROOT, "scheduler")
-                self.scheduler = ResMultistepFlowMatchScheduler.from_pretrained(scheduler_dir)
+                _scheduler = ResMultistepFlowMatchScheduler.from_pretrained(scheduler_dir)
 
-                # --- 6. Assemble Pipeline ---
-                _progress(0.75, "Pipeline 조립")
+                # --- 6. Assemble Pipeline (components already on GPU) ---
+                _progress(0.8, "Pipeline 조립")
                 self.pipe = ZImagePipeline(
-                    transformer=self.transformer,
-                    vae=self.vae,
-                    text_encoder=self.text_encoder,
-                    tokenizer=self.tokenizer,
-                    scheduler=self.scheduler,
+                    transformer=_transformer,
+                    vae=_vae,
+                    text_encoder=_text_encoder,
+                    tokenizer=_tokenizer,
+                    scheduler=_scheduler,
                 )
-
-                _progress(0.8, "GPU 전송")
-                self.pipe.to("cuda")
+                del _transformer, _vae, _text_encoder
+                gc.collect()
 
                 # Apply Cache-DiT if available (aggressive settings for RTX 5090)
                 if cache_dit:
