@@ -98,23 +98,22 @@ class ImageWorker:
         self.current_model = model_type
         log(f"✅ Model loaded: {result}")
     
-    def generate_image(self, prompt: str, image_data: str = None, steps: int = 8, cfg: float = 0.0):
-        """Generate image from prompt."""
+    def generate_image(self, prompt: str, image_data: str = None, steps: int = 8):
+        """Generate image from prompt (Turbo: CFG=0.0 fixed, no negative prompt)."""
         log(f"🎨 Generating: {prompt[:50]}...")
-        
+
         # Decode input image if provided
         input_image = None
         if image_data:
             from PIL import Image
             img_bytes = base64.b64decode(image_data)
             input_image = Image.open(io.BytesIO(img_bytes))
-        
-        # Generate
+
+        # Generate (Turbo engine handles CFG internally)
         result_image = self.engine.generate(
             prompt=prompt,
             image=input_image,
             steps=steps,
-            guidance_scale=cfg
         )
         
         # Convert to base64
@@ -171,16 +170,15 @@ class ImageWorker:
         prompt = job.get("prompt", "")
         input_image = job.get("input_image")  # base64 or None
         steps = job.get("steps", 8)
-        cfg = job.get("guidance_scale", 0.0)
-        
-        log(f"📋 Processing job: {job_id}")
-        
+
+        log(f"📋 Processing job: {job_id} (model: {model_type})")
+
         try:
             # 1. Load model
             self.load_model(model_type)
-            
+
             # 2. Generate image
-            result_image = self.generate_image(prompt, input_image, steps, cfg)
+            result_image = self.generate_image(prompt, input_image, steps)
             
             # 3. Upload result
             self.upload_result(job_id, result_image, success=True)

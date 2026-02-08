@@ -1,2 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
 venv/
+
+# Model weights (large binaries)
 models/
+
+# Environment secrets
+.env
+
+# Brand assets
+Logo/
+
+# Dev/debug screenshots
+.playwright-mcp/
+
+# Reference documentation & guides
+zimagebase/
+Qwen_image_edit_2511/
+zimageturbo/Z-Image-Turbo-Fun-Controlnet-Union-2.1*.md
+zimageturbo/Z-Image ControlNet.json
+
+# Reference/unused code
+zimageturbo/comfyui_*.py
+zimageturbo/batch_lora_test.py
+zimageturbo/videox_fun/
+
+# Output files
+zimageturbo/output/
+zimageturbo/output_*.png
+
+# Sample assets
+zimageturbo/asset/
+
+# Backup files
+zimageturbo/requirements_backup.txt

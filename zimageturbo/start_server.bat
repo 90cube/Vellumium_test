@@ -7,7 +7,7 @@ echo ====================================================
 echo.
 
 echo [Starting] app_engine.py...
-venv\Scripts\python.exe app_engine.py
+..\venv\Scripts\python.exe app_engine.py
 
 echo.
 echo Server stopped.

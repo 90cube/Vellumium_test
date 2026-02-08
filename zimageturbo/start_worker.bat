@@ -16,7 +16,7 @@ echo [INFO] Starting worker...
 echo [INFO] Press Ctrl+C to stop
 echo.
 
-venv\Scripts\python.exe worker.py
+..\venv\Scripts\python.exe worker.py
 
 echo.
 echo Worker stopped.
