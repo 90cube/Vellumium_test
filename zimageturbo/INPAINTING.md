@@ -1,57 +1,90 @@
-# Z-Image Inpainting Architecture Guide
+# Z-Image Technical Guide
 
-## Overview
+## 1. RAM Optimization — Meta-Device Init
 
-Z-Image-Turbo uses two distinct inpainting strategies depending on whether ControlNet is active.
+### Problem
 
-## Strategy 1: ControlNet Inpainting (Native)
+`Model.from_config()` allocates ALL parameters in fp32 first (~14GB for transformer, ~6GB for ControlNet).
+Even with `assign=True` in `load_state_dict()`, Python's pymalloc on Windows **never returns freed pages to OS**.
+The process RSS stays bloated with dead memory.
 
-When ControlNet is loaded and active, inpainting is handled **entirely by the ControlNet's 33-channel input**. No external callback is used.
+### Trial & Error
 
-### 33-Channel Input Format
+| Attempt | Approach | Result (RSS) | Verdict |
+|---------|----------|-------------|---------|
+| Baseline | `from_config()` + `load_state_dict(strict=False)` + `.to(cuda)` | ~24 GB | fp32 init → permanent ghost pages |
+| #1 | Properties + immediate `.to("cuda")` per component + `gc.collect()` | 24.87 GB | Marginal. Dead pages already committed |
+| #2 | `load_safetensors(device="cuda")` + `device_map="cuda"` | 32.29 GB | **Worse**. GPU→CPU→GPU double copy |
+| #3 | `assign=True` in `load_state_dict` + `device_map="cuda"` for VAE/TE | 24.35 GB | Marginal. fp32 init is the real problem |
+| **#4 (Final)** | **`init_empty_weights()` + `assign=True`** | **959 MB** | **96% reduction** |
 
-```
-[control_latent(16ch), mask(1ch), inpaint_latent(16ch)]
-```
+### Why #2 Failed
 
-- **control_latent**: VAE-encoded control image (canny, pose, depth, etc.)
-- **mask**: Inverted binary mask — `1 = keep`, `0 = regenerate`
-- **inpaint_latent**: VAE-encoded inpaint image with mask applied
+`load_safetensors(device="cuda")` loads tensors directly to GPU. But `load_state_dict()` copies them back to CPU-allocated model parameters, then `.to("cuda")` copies them again. Triple allocation: GPU state_dict + CPU fp32 params + GPU final params.
 
-### Mask Preprocessing (ComfyUI Convention)
+### Solution (Current)
 
 ```python
-# 1. Invert mask: UI mask is 1=regenerate, model expects 1=keep
-mask_keep = (1.0 - mask).round()
+from accelerate import init_empty_weights
 
-# 2. Apply mask to inpaint image: preserve kept areas, gray-fill regenerate areas
-inpaint_image = (original_image - 0.5) * mask_keep + 0.5
+# 1. Create model skeleton on meta device (ZERO memory)
+with init_empty_weights():
+    model = ZImageTransformer2DModel.from_config(config)
 
-# 3. Encode to latent
+# 2. Fill with bf16 tensors from safetensors (assign=True swaps pointers)
+model.load_state_dict(state_dict, strict=False, assign=True)
+del state_dict; gc.collect()
+
+# 3. Move to GPU (only bf16 tensors exist, ~7GB briefly on CPU)
+model.to(device="cuda")
+gc.collect()
+```
+
+Same pattern for ControlNet in `zimage_control.py`:
+```python
+with init_empty_weights():
+    module = ZImageControlModule(**config)
+module.load_state_dict(sd, strict=False, assign=True)
+```
+
+### Key Insight
+
+`assign=True` makes `load_state_dict` **replace** parameter tensors instead of copying into them.
+Combined with meta-device init (no real tensors to copy into), the model never touches system RAM beyond the transient safetensors read buffer.
+
+### Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| RSS (base + ControlNet) | 23,855 MB | 959 MB |
+| SysRAM% | 56.8% | 21.3% |
+| GPU VRAM | 26,143 MB | 26,143 MB (unchanged) |
+
+VAE and Text Encoder use `from_pretrained(device_map="cuda")` which internally does the same meta-device pattern via accelerate.
+
+---
+
+## 2. Inpainting Architecture
+
+### Strategy 1: ControlNet Inpainting (Native 33ch)
+
+When ControlNet is active, inpainting is handled **entirely by the 33-channel input**. No callback.
+
+**33-Channel Format**: `[control_latent(16), mask(1), inpaint_latent(16)]`
+
+**Mask Preprocessing (ComfyUI Convention)**:
+```python
+mask_keep = (1.0 - mask).round()                        # invert + binarize
+inpaint_image = (original_image - 0.5) * mask_keep + 0.5  # gray-fill masked areas
 inpaint_latent = vae.encode(inpaint_image)
-
-# 4. Mask channel: inverted, downsampled to latent resolution via nearest
 mask_channel = interpolate(1.0 - mask, latent_size, mode='nearest')
 ```
 
-The `.round()` on the keep-mask ensures binary boundaries — no partial transparency leaks into the ControlNet input.
+**Why no callback**: The ControlNet was **trained** with this conditioning. Adding a noise-masking callback overwrites latent values the ControlNet already adjusted → stripe artifacts at patch boundaries.
 
-### Why No Callback
+### Strategy 2: RePaint Callback (No ControlNet)
 
-The ControlNet model was **trained** with this 33-channel conditioning. It learns to:
-- Reconstruct kept areas from the inpaint latent
-- Generate new content in masked areas guided by the control signal
-- Blend boundaries naturally through its learned attention mechanism
-
-Adding an external noise-masking callback **conflicts** with this — the callback overwrites latent values that the ControlNet has already adjusted, creating stripe artifacts at patch boundaries.
-
-## Strategy 2: RePaint Callback (No ControlNet)
-
-When ControlNet is NOT active, `ZImagePipeline` is pure text-to-image with no inpainting support. We use a `callback_on_step_end` to inject noise-level masking.
-
-### Algorithm (Flow Matching RePaint)
-
-At each denoising step `t` with sigma schedule `σ_t → 0`:
+`ZImagePipeline` is pure text-to-image. We inject noise-level masking via `callback_on_step_end`:
 
 ```
 σ = scheduler.sigmas[step + 1]
@@ -59,17 +92,24 @@ noised_original = σ * noise + (1 - σ) * original_latent
 latents = mask * latents + (1 - mask) * noised_original
 ```
 
-Where `mask = 1` means regenerate, `mask = 0` means keep original.
+Limitations: No bidirectional feedback, hard seams with few steps (8).
 
-This forces non-masked regions to follow the noise schedule of the original image, while masked regions are freely denoised by the model.
+---
 
-### Limitations
+## 3. Sampler: res_multistep
 
-- No bidirectional feedback between masked/unmasked regions
-- Hard mask boundaries can produce visible seams with few steps (8)
-- Works best for simple inpainting without ControlNet guidance
+2nd-order exponential integrator based on ComfyUI's k_diffusion implementation.
 
-## Parameters
+- First step: Euler
+- Subsequent steps: Uses previous model output for 2nd-order correction (phi1/phi2 functions)
+- Last step (sigma < eps): Jump directly to denoised
+- No extra model evaluations — reuses `_old_denoised` from previous step
+
+Flow matching velocity → x0: `denoised = sample - sigma * model_output`
+
+---
+
+## 4. Parameters
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
@@ -77,10 +117,11 @@ This forces non-masked regions to follow the noise schedule of the original imag
 | `shift` | 3.0 | Scheduler sigma shift |
 | `control_context_scale` | 0.75 | ControlNet strength (0.65–1.0 optimal) |
 | `steps` | 8 | Turbo distilled model |
-| `sampler` | res_multistep | 2nd-order multistep (exponential integrator) |
+| `sampler` | res_multistep | 2nd-order multistep exponential integrator |
 
-## Reference
+## 5. Reference
 
-- ComfyUI implementation: `comfy_extras/nodes_model_patch.py` → `ZImageControlPatch`
-- ControlNet model: `comfy/ldm/lumina/controlnet.py` → `ZImage_Control`
-- Mask convention: ComfyUI inverts mask before passing to model (`mask = 1.0 - mask`)
+- ComfyUI ControlNet: `comfy_extras/nodes_model_patch.py` → `ZImageControlPatch`
+- ComfyUI ControlNet model: `comfy/ldm/lumina/controlnet.py` → `ZImage_Control`
+- Mask convention: ComfyUI inverts mask before passing to model
+- RAM benchmark: `zimageturbo/test_ram.py` (headless, no Gradio)

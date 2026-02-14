@@ -1,0 +1,154 @@
+html {
+  --cinema-bg: #0b0b15;
+  --cinema-primary: #7a1ff9;
+  --cinema-primary-dim: rgba(122, 31, 249, 0.4);
+  --cinema-accent: #00f2ff;
+  --cinema-error: #ef4444;
+  --cinema-text: #ffffff;
+  --cinema-text-muted: #94a3b8;
+  --cinema-text-dim: #475569;
+  --cinema-border: rgba(255, 255, 255, 0.1);
+  --cinema-surface: #131325;
+  --cinema-panel: rgba(255, 255, 255, 0.03);
+
+  /* Ticket Colors (Dark Default) */
+  --ticket-bg: #000000;
+  --ticket-text: #ffd700;
+  /* Goldish text */
+  --ticket-line: #b8860b;
+}
+
+html[data-theme="light"],
+body[data-theme="light"] {
+  --cinema-bg: #f8fafc;
+  --cinema-primary: #7a1ff9;
+  --cinema-primary-dim: rgba(122, 31, 249, 0.2);
+  --cinema-accent: #00f2ff;
+  --cinema-error: #ef4444;
+  --cinema-text: #0f172a;
+  --cinema-text-muted: #64748b;
+  --cinema-text-dim: #94a3b8;
+  --cinema-border: rgba(0, 0, 0, 0.1);
+  --cinema-surface: #ffffff;
+  --cinema-panel: rgba(0, 0, 0, 0.03);
+
+  /* Ticket Colors (Light) */
+  --ticket-bg: #e2c08d;
+  --ticket-text: #2d1b15;
+  --ticket-line: #5d4037;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--cinema-bg);
+  color: var(--cinema-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ── UI Text Selection Prevention ──
+   All UI text (labels, buttons, icons, headings) is non-selectable.
+   Only explicit input fields (input, textarea, [contenteditable]) remain selectable. */
+*:not(input):not(textarea):not([contenteditable="true"]) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.glass-panel {
+
+  /* Fix Input Backgrounds */
+  input {
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+
+  /* Fix Input Autofill Background to be Transparent */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 30px transparent inset !important;
+    transition: background-color 5000s ease-in-out 0s;
+  }
+}
+
+/* TICKET STYLES */
+.ticket-container {
+  display: flex;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.3));
+}
+
+.tear-right {
+  animation: tearRight 0.8s forwards cubic-bezier(0.6, -0.28, 0.735, 0.045);
+}
+
+.ticket-part {
+  position: relative;
+  background: var(--ticket-bg);
+  color: var(--ticket-text);
+  /* Scalloped edge logic using radial-gradient mask */
+  --mask: radial-gradient(12px at 12px 50%, #0000 98%, #000) 0 / 100% 40px;
+}
+
+.ticket-left {
+  padding: 2.5rem 3rem;
+  /* Increased padding */
+  border-right: 2px dashed var(--ticket-line);
+  mask: radial-gradient(circle at left, transparent 10px, black 11px);
+  mask-position: -10px 0;
+  mask-composite: exclude;
+  border-radius: 8px 0 0 8px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+/* Fix Input Autofill Background */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 30px var(--ticket-bg) inset !important;
+  -webkit-text-fill-color: var(--ticket-text) !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+.ticket-left::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -10px;
+  width: 20px;
+  background: radial-gradient(circle, transparent 70%, var(--cinema-bg) 71%);
+  background-size: 20px 20px;
+  background-position: 0 10px;
+}
+
+.ticket-right {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-weight: bold;
+  font-size: 1.5rem;
+  padding: 1rem 1.5rem;
+  cursor: pointer;
+  border-radius: 0 8px 8px 0;
+  transition: filter 0.2s;
+}
+
+.ticket-right:hover {
+  filter: brightness(1.1);
+}
+
+.ticket-right:active {
+  filter: brightness(0.9);
+}

@@ -95,3 +95,7 @@ The 2601 versions fix artifacts and mask leakage from earlier iterations.
 - No test suite currently exists
 - The `cache_dit/` directory is vendored third-party code — avoid modifying it
 - Model weights are large binary files excluded via `.gitignore`
+
+## Frontend UI Rules
+
+- **UI text is non-selectable**: All labels, buttons, icons, headings must not be draggable/selectable by the user. This is enforced globally in `src/index.css` via `user-select: none` on all elements. Only `<input>`, `<textarea>`, and `[contenteditable]` are exempt. Do NOT add `user-select: text` to UI elements.

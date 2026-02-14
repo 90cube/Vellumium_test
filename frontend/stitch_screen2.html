@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Director Box: Active Scene View</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#2b2bee",
+                        "background-light": "#f6f6f8",
+                        "background-dark": "#101022",
+                    },
+                    fontFamily: {
+                        "display": ["Space Grotesk", "sans-serif"],
+                        "body": ["Noto Sans", "sans-serif"],
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        .glass-panel {
+            background: rgba(35, 35, 72, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .film-strip-glow {
+            box-shadow: 0 0 20px rgba(43, 43, 238, 0.15);
+        }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-white font-display overflow-hidden h-screen flex flex-col">
+<!-- Top Navigation -->
+<header class="flex items-center justify-between whitespace-nowrap border-b border-solid border-b-[#232348] bg-[#111122]/95 px-6 py-3 z-50">
+<div class="flex items-center gap-4 text-white">
+<div class="size-8 text-primary">
+<span class="material-symbols-outlined text-3xl">movie_filter</span>
+</div>
+<h2 class="text-white text-lg font-bold leading-tight tracking-[-0.015em]">Director Box</h2>
+</div>
+<!-- Central Tabs -->
+<div class="hidden md:flex bg-[#232348] rounded-full p-1">
+<button class="px-4 py-1.5 rounded-full bg-primary text-white text-sm font-medium">Timeline</button>
+<button class="px-4 py-1.5 rounded-full text-gray-400 hover:text-white text-sm font-medium transition-colors">Storyboard</button>
+<button class="px-4 py-1.5 rounded-full text-gray-400 hover:text-white text-sm font-medium transition-colors">Script</button>
+</div>
+<div class="flex flex-1 justify-end gap-4">
+<div class="flex gap-2">
+<button class="flex items-center justify-center rounded-lg size-10 bg-[#232348] hover:bg-[#2b2b55] text-white transition-colors">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<button class="flex items-center justify-center rounded-lg size-10 bg-[#232348] hover:bg-[#2b2b55] text-white transition-colors">
+<span class="material-symbols-outlined">ios_share</span>
+</button>
+<button class="flex items-center justify-center rounded-lg size-10 bg-[#232348] hover:bg-[#2b2b55] text-white transition-colors">
+<span class="material-symbols-outlined">group_add</span>
+</button>
+</div>
+<div class="bg-center bg-no-repeat bg-cover rounded-full size-10 border-2 border-[#232348]" data-alt="User profile picture" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuBMeKcHRmYA2IA--ryoiZQsWY-fd-QbXlnYfslM283b_CXAlOTbruOwqK74rNHQvMxjMsBHzEMu3SEYEsJbJ6kp2P-cISqmcpom_uItNSqSTgevIhp-zVKhxw_v6AmvLt8C-kN50BFxk4yRzXo_gxpX0j1HXAnSxofWuiIM8-DisO_H72VOupxz1Ii5lz50ObbPhUnLeFA_PZphfwerq26d6rWF6I_ue32DRN35NDFTJrIWuflj3-2QYD0G8JjFRC_ZQC6baMZ9_6U");'></div>
+</div>
+</header>
+<main class="flex-1 flex overflow-hidden relative">
+<!-- Left Toolbar -->
+<aside class="w-16 bg-[#111122] border-r border-[#232348] flex flex-col items-center py-4 gap-6 z-40 shrink-0">
+<div class="flex flex-col gap-4">
+<button class="group relative flex items-center justify-center size-10 rounded-lg bg-primary text-white shadow-[0_0_10px_rgba(43,43,238,0.5)]">
+<span class="material-symbols-outlined">auto_fix_high</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Selection</span>
+</button>
+<button class="group relative flex items-center justify-center size-10 rounded-lg text-gray-400 hover:text-white hover:bg-[#232348] transition-colors">
+<span class="material-symbols-outlined">content_cut</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Razor</span>
+</button>
+<button class="group relative flex items-center justify-center size-10 rounded-lg text-gray-400 hover:text-white hover:bg-[#232348] transition-colors">
+<span class="material-symbols-outlined">edit</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Pen</span>
+</button>
+<button class="group relative flex items-center justify-center size-10 rounded-lg text-gray-400 hover:text-white hover:bg-[#232348] transition-colors">
+<span class="material-symbols-outlined">pan_tool</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Hand</span>
+</button>
+<button class="group relative flex items-center justify-center size-10 rounded-lg text-gray-400 hover:text-white hover:bg-[#232348] transition-colors">
+<span class="material-symbols-outlined">zoom_in</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Zoom</span>
+</button>
+<div class="h-px w-8 bg-[#232348] mx-auto my-2"></div>
+<button class="group relative flex items-center justify-center size-10 rounded-lg text-gray-400 hover:text-white hover:bg-[#232348] transition-colors">
+<span class="material-symbols-outlined">layers</span>
+<span class="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">Layers</span>
+</button>
+</div>
+</aside>
+<!-- Main Canvas Area -->
+<section class="flex-1 flex flex-col relative bg-[#0a0a14]">
+<!-- Vertical Film Strip Context (Previous Scene - Top) -->
+<div class="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-[#0a0a14] to-transparent z-10 pointer-events-none"></div>
+<div class="h-16 w-1/2 mx-auto mt-[-2rem] opacity-30 blur-sm scale-90 transform origin-bottom transition-all duration-300 hover:opacity-50 cursor-pointer rounded-b-xl overflow-hidden border border-[#333]">
+<div class="w-full h-full bg-cover bg-center" data-alt="Previous scene thumbnail preview" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuBXinMN5vns8SrlUMzChBxmHoKcBCHgb_74mrRSoE26JcJzRSEpQnRSH5fgtN0sJNWORpBGK6pXiXe5vTtVEuW9DXH2EC07pbLFkBFYOiueomj2UKKytzjuu2lEM-g4Ob_aQJCkrRpb7otHJWJasfjsLPj6GVdUgBRloPLwWNhmcaTAVCPXtQRUHaHlmFAtawNdakYUfllQnvj2PUJTNzFrvkV9gOgV2KOC-MAPA1kp5_Hs1s5ZGHNLZLSk1FKWtBZZDpkKWDmulG8");'></div>
+</div>
+<!-- Central Content Container -->
+<div class="flex-1 flex items-center justify-center px-8 relative">
+<!-- Left Layer Panel -->
+<div class="hidden xl:flex flex-col w-64 h-[60%] justify-center gap-4 z-20 -mr-12 opacity-80 hover:opacity-100 transition-opacity duration-300">
+<div class="glass-panel p-4 rounded-xl transform perspective-1000 rotate-y-12 translate-x-4 border-l-4 border-l-purple-500/50">
+<div class="flex justify-between items-center mb-2">
+<span class="text-xs font-bold uppercase tracking-wider text-purple-300">Background</span>
+<span class="material-symbols-outlined text-sm text-gray-400">visibility</span>
+</div>
+<div class="aspect-video rounded bg-black/40 bg-cover bg-center border border-white/5" data-alt="Background layer preview showing cityscape" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuDforRWgok9ZkLa4bgnR1o37MLE1G8BxmcLPmHKXOtczWIw0YqOUd3TgFk3eK_tL2XbD4NX8US1LapSR7T0trLvraIDoIZgR1gwuCJk2YNDsWUubcsdfE6-BKziWOzYWhtxdDvYYMDPEEVXDUM28B-Qze70U7PMGVSvuFga2wBug2Y-vgezV_oztitqfnRJo5wLvtiXfLLTPnkavfUg4NY3a__C98kRBHAAbQgPm-aHMkyVBNdeORax7tQq_Zimy9dodEKF61iGz9g");'></div>
+</div>
+<div class="glass-panel p-4 rounded-xl transform perspective-1000 rotate-y-12 translate-x-8 border-l-4 border-l-blue-500/50">
+<div class="flex justify-between items-center mb-2">
+<span class="text-xs font-bold uppercase tracking-wider text-blue-300">Reference</span>
+<span class="material-symbols-outlined text-sm text-gray-400">visibility</span>
+</div>
+<div class="aspect-video rounded bg-black/40 bg-cover bg-center border border-white/5" data-alt="Reference footage layer preview" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuAEwjcvWy3YRTzPK_intv8YVS47vEKanzPmUJe8Is9G6Fg8n-velS8zwnKY30QsVFNt-wMmg5auGnzNr3MrhDBgD9JrH6T9kkriTCPObdlaLQJUi1fdtxAd6SYrRSLSW9qvX2FSGSCbk4lHdBeDuoLaiOrxsappUpDU-xsY-414VRC8QuIzj1Xnz8FkReLwZvykC2BdrlHUED-vPBfeyL0_0ZTcpWX31E5SCWA7dYSJSlIJjE5juyo09550CX6ITyY_JmQe8p51Czg");'></div>
+</div>
+</div>
+<!-- Main Canvas (Active Scene) -->
+<div class="relative w-full max-w-[1200px] aspect-[21/9] z-30 group">
+<div class="absolute inset-0 bg-black rounded-lg film-strip-glow border border-[#333366] overflow-hidden">
+<!-- Scene Image -->
+<div class="w-full h-full bg-cover bg-center" data-alt="Cinematic shot of a rooftop confrontation at night with rain" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuCl2TtwP01AzQqEtSUoZ4DUZt1637UMMv_yWIzf03fpbaXFQYdLr5T4wkiIFNsHlwqoxsoIC3ENFwif1l-cGikHbESywsSXPpub4atPRv67N1lDv4nrFO9OoSdg0tIdzEnmjs3vpxKIrFi8hSW3RVHRGTN6kN1Q62kRRigm7VGZ42FrjbsOb3FPid5boHwS7HdcEU52382mFjIWZoNcNCn044xY6GsU9PchKAL_eeho5Xj2b1Jp4ttmW6FR7mkP12VZXhaYe-XNoLU");'>
+<!-- Overlay UI on Hover -->
+<div class="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors duration-300 flex items-center justify-center">
+<button class="opacity-0 group-hover:opacity-100 transform scale-90 group-hover:scale-100 transition-all duration-300 bg-white/10 backdrop-blur-md border border-white/20 rounded-full p-4 hover:bg-white/20 text-white">
+<span class="material-symbols-outlined text-4xl">play_arrow</span>
+</button>
+</div>
+</div>
+<!-- Canvas Controls Overlay -->
+<div class="absolute top-4 right-4 flex gap-2">
+<div class="px-2 py-1 bg-black/60 backdrop-blur-md rounded text-xs font-mono text-gray-300 border border-white/10">REC.709</div>
+<div class="px-2 py-1 bg-black/60 backdrop-blur-md rounded text-xs font-mono text-gray-300 border border-white/10">4K</div>
+</div>
+<!-- Safe Areas / Grid (Subtle) -->
+<div class="absolute inset-0 pointer-events-none opacity-20">
+<div class="w-full h-full border-[1px] border-white/30 m-8"></div> <!-- Action Safe -->
+<div class="absolute top-1/2 left-0 w-full h-px bg-white/20"></div>
+<div class="absolute left-1/2 top-0 h-full w-px bg-white/20"></div>
+</div>
+</div>
+<!-- Scene Info Floating Label -->
+<div class="absolute -bottom-6 left-0 flex items-center gap-3">
+<span class="text-2xl font-bold text-white tracking-tight">SCENE 14B</span>
+<span class="text-sm font-medium text-gray-400 uppercase tracking-widest border-l border-gray-600 pl-3">Rooftop Confrontation • Night • Rain</span>
+</div>
+</div>
+<!-- Right Layer Panel -->
+<div class="hidden xl:flex flex-col w-64 h-[60%] justify-center gap-4 z-20 -ml-12 opacity-80 hover:opacity-100 transition-opacity duration-300">
+<div class="glass-panel p-4 rounded-xl transform perspective-1000 -rotate-y-12 -translate-x-8 border-r-4 border-r-orange-500/50">
+<div class="flex justify-between items-center mb-2">
+<span class="text-xs font-bold uppercase tracking-wider text-orange-300">Actors</span>
+<span class="material-symbols-outlined text-sm text-gray-400">visibility</span>
+</div>
+<div class="aspect-video rounded bg-black/40 bg-cover bg-center border border-white/5" data-alt="Green screen actor layer preview" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuDlysmxjQgdT5XpLZJkBI3DPiF8AAuopdIzpWL6j6IT5Uf3RfzsiJNbmTdAu1keNG_OQXfupuZHYkl_NdHHpYT_c0nIxtVVgB87gDsOZ3CY7SnIg0RaMBPM05ZW-69bvfqhIHJfgXjgeYyGaEva4mvNL855RP-4IEa5PWEv4HYSR8OxZ1g1MZAf9RhODzgBb6bdqz98nczHyCmFqVpPXkIvAckBEJAn0OOlQ9acHW7A6hT-9X3DN0N3yWRgSEgsxhUxPb6H8IKEpxk");'></div>
+</div>
+<div class="glass-panel p-4 rounded-xl transform perspective-1000 -rotate-y-12 -translate-x-4 border-r-4 border-r-green-500/50">
+<div class="flex justify-between items-center mb-2">
+<span class="text-xs font-bold uppercase tracking-wider text-green-300">VFX / Rain</span>
+<span class="material-symbols-outlined text-sm text-gray-400">visibility</span>
+</div>
+<div class="aspect-video rounded bg-black/40 bg-cover bg-center border border-white/5" data-alt="Rain particle effect layer preview" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuBglDOJMIMqtnVeqGm6LP5fDl8DI9aOw7a5ySFbEQTfpe4_zo2Ft6lBtM_x8o4b8YTLGa1utAQlbwXEADOobxgfvpPz24mGtWYgSLhDuCckPduqEQmmSkZGxikNUF0vKdUznpKxFd9nFayCnVjMO1XpZ2aSvmFpmwY-LpUs-2IoPChw7Q9YRTSiveAswWauOaL2rTiL-hMkLBMXo2vr3sd7N-o0fzSoMM02khzKUGsZOJRUcMRR8-6Q9e4XGaI8EliWRMT1SjpiZS8");'></div>
+</div>
+</div>
+</div>
+<!-- Vertical Film Strip Context (Next Scene - Bottom) -->
+<div class="h-16 w-1/2 mx-auto mb-[-2rem] opacity-30 blur-sm scale-90 transform origin-top transition-all duration-300 hover:opacity-50 cursor-pointer rounded-t-xl overflow-hidden border border-[#333]">
+<div class="w-full h-full bg-cover bg-center" data-alt="Next scene thumbnail preview" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuAARmxDdjrCK_K3yjrwrKwiVHbqKY8kj1JBNpHbaCyTFHY-wpPSy2IZ6YdFlFTPZgIk0AZ7WWfxcAwRqONd3WtBxL5mS87x1eWvrMQb29hO6-YG3mHbTO7GyuUYDeVZRaZqYj2IzxtawVbTt805bh2hmv6DrIV355g7uaD7pmhJA5JOyfqes0qq0rQ8wo1jpk9RGRUR81caKteyQFvLGJvUpW6omh8mBuYiU_AqzsTRYjsKWE-TOnNHQX0X1S6b1arUH9pf79XawE4");'></div>
+</div>
+<div class="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-[#0a0a14] to-transparent z-10 pointer-events-none"></div>
+<!-- Bottom Playback Controls -->
+<div class="h-20 bg-[#111122] border-t border-[#232348] px-6 flex items-center justify-between z-40 relative">
+<div class="flex items-center gap-4 w-1/4">
+<div class="flex flex-col">
+<span class="text-xs text-gray-400 font-mono">TC: 00:14:32:12</span>
+<span class="text-xs text-gray-500 font-mono">DUR: 00:02:45:00</span>
+</div>
+</div>
+<div class="flex flex-col items-center flex-1 max-w-2xl gap-2">
+<div class="flex items-center gap-6">
+<button class="text-gray-400 hover:text-white transition-colors"><span class="material-symbols-outlined">skip_previous</span></button>
+<button class="text-gray-400 hover:text-white transition-colors"><span class="material-symbols-outlined">fast_rewind</span></button>
+<button class="flex items-center justify-center size-10 rounded-full bg-primary hover:bg-blue-600 text-white shadow-lg transition-transform hover:scale-105">
+<span class="material-symbols-outlined fill-current">play_arrow</span>
+</button>
+<button class="text-gray-400 hover:text-white transition-colors"><span class="material-symbols-outlined">fast_forward</span></button>
+<button class="text-gray-400 hover:text-white transition-colors"><span class="material-symbols-outlined">skip_next</span></button>
+</div>
+<!-- Timeline Scrubber -->
+<div class="w-full h-6 flex items-center gap-3 group/scrubber cursor-pointer">
+<span class="text-[10px] text-gray-500 font-mono w-8 text-right">Start</span>
+<div class="flex-1 h-1.5 bg-[#232348] rounded-full relative overflow-visible">
+<div class="absolute top-0 left-0 h-full w-[32%] bg-gradient-to-r from-blue-600 to-primary rounded-full"></div>
+<div class="absolute top-1/2 left-[32%] -translate-y-1/2 -translate-x-1/2 size-3 bg-white rounded-full shadow cursor-grab opacity-0 group-hover/scrubber:opacity-100 transition-opacity"></div>
+<!-- Markers -->
+<div class="absolute top-1/2 left-[15%] -translate-y-1/2 size-1.5 bg-yellow-500 rounded-full" title="Note"></div>
+<div class="absolute top-1/2 left-[65%] -translate-y-1/2 size-1.5 bg-green-500 rounded-full" title="Cut"></div>
+</div>
+<span class="text-[10px] text-gray-500 font-mono w-8">End</span>
+</div>
+</div>
+<div class="flex items-center justify-end gap-4 w-1/4">
+<div class="flex items-center gap-2 px-3 py-1 bg-[#191933] rounded-lg border border-[#232348]">
+<span class="material-symbols-outlined text-gray-400 text-sm">volume_up</span>
+<div class="w-16 h-1 bg-[#232348] rounded-full overflow-hidden">
+<div class="h-full w-[70%] bg-gray-400"></div>
+</div>
+</div>
+<button class="text-gray-400 hover:text-white"><span class="material-symbols-outlined">fullscreen</span></button>
+</div>
+</div>
+</section>
+<!-- Right Property Panel -->
+<aside class="w-72 bg-[#111122] border-l border-[#232348] flex flex-col z-40 shrink-0">
+<!-- Tabs -->
+<div class="flex border-b border-[#232348]">
+<button class="flex-1 py-3 text-sm font-medium text-white border-b-2 border-primary bg-[#191933]">Properties</button>
+<button class="flex-1 py-3 text-sm font-medium text-gray-400 hover:text-gray-200 transition-colors">Metadata</button>
+</div>
+<div class="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
+<!-- Camera Section -->
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Camera</h3>
+<span class="material-symbols-outlined text-sm text-gray-500">videocam</span>
+</div>
+<div class="bg-[#191933] rounded-lg p-3 border border-[#232348] space-y-3">
+<div class="grid grid-cols-2 gap-2">
+<div>
+<label class="text-[10px] text-gray-500 uppercase block mb-1">Lens</label>
+<select class="w-full bg-[#111122] text-white text-xs border border-[#232348] rounded px-2 py-1 focus:ring-1 focus:ring-primary focus:border-primary">
+<option>35mm Prime</option>
+<option>50mm Prime</option>
+<option>85mm Prime</option>
+</select>
+</div>
+<div>
+<label class="text-[10px] text-gray-500 uppercase block mb-1">Aperture</label>
+<select class="w-full bg-[#111122] text-white text-xs border border-[#232348] rounded px-2 py-1 focus:ring-1 focus:ring-primary focus:border-primary">
+<option>f/2.8</option>
+<option>f/4.0</option>
+<option>f/5.6</option>
+</select>
+</div>
+</div>
+<div>
+<label class="text-[10px] text-gray-500 uppercase block mb-1">Movement</label>
+<div class="flex gap-2">
+<button class="flex-1 bg-primary text-white text-xs py-1 rounded">Dolly In</button>
+<button class="flex-1 bg-[#232348] hover:bg-[#2b2b55] text-gray-300 text-xs py-1 rounded transition-colors">Pan Left</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Lighting Section -->
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Lighting</h3>
+<span class="material-symbols-outlined text-sm text-gray-500">light_mode</span>
+</div>
+<div class="bg-[#191933] rounded-lg p-3 border border-[#232348] space-y-3">
+<div class="flex justify-between items-center">
+<span class="text-xs text-gray-300">Global Intensity</span>
+<span class="text-xs text-primary font-mono">85%</span>
+</div>
+<input class="w-full h-1 bg-[#232348] rounded-lg appearance-none cursor-pointer [&amp;::-webkit-slider-thumb]:appearance-none [&amp;::-webkit-slider-thumb]:size-3 [&amp;::-webkit-slider-thumb]:rounded-full [&amp;::-webkit-slider-thumb]:bg-primary" type="range" value="85"/>
+<div class="flex justify-between items-center mt-2">
+<span class="text-xs text-gray-300">Color Temp</span>
+<span class="text-xs text-orange-300 font-mono">3200K</span>
+</div>
+<input class="w-full h-1 bg-gradient-to-r from-orange-500 via-white to-blue-500 rounded-lg appearance-none cursor-pointer [&amp;::-webkit-slider-thumb]:appearance-none [&amp;::-webkit-slider-thumb]:size-3 [&amp;::-webkit-slider-thumb]:rounded-full [&amp;::-webkit-slider-thumb]:bg-white" type="range" value="20"/>
+</div>
+</div>
+<!-- Notes Section -->
+<div class="flex flex-col gap-3 flex-1">
+<div class="flex items-center justify-between">
+<h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Director's Notes</h3>
+<button class="text-primary text-xs hover:underline">Add New</button>
+</div>
+<div class="bg-[#191933] rounded-lg p-3 border border-[#232348] h-full overflow-hidden">
+<textarea class="w-full h-full bg-transparent text-sm text-gray-300 resize-none border-none focus:ring-0 p-0 placeholder-gray-600" placeholder="Type notes here...">Ensure the rain effect doesn't obscure the actor's expression in the close-up. Boost the rim light on the left side.</textarea>
+</div>
+</div>
+<!-- Action Button -->
+<button class="w-full bg-primary hover:bg-blue-600 text-white font-medium py-3 rounded-lg shadow-lg shadow-blue-900/20 transition-all active:scale-95 flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-lg">save</span>
+                    Save Changes
+                </button>
+</div>
+</aside>
+</main>
+</body></html>

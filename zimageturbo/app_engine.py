@@ -1,11 +1,14 @@
 import os
 import sys
 import gc
+from dotenv import load_dotenv
+load_dotenv()
 import psutil
 import torch
 import time
 import threading
 import glob
+import uuid
 from contextlib import asynccontextmanager
 
 # Fix Windows cp949 encoding for emoji/unicode output
@@ -13,9 +16,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Tuple
-import gradio as gr
+import base64
+import io
 from PIL import Image
 import numpy as np
 from omegaconf import OmegaConf
@@ -214,14 +220,31 @@ RESOLUTION_2MP = {
 CONTROL_TYPES = ["None", "Canny", "HED", "Depth", "Pose", "MLSD"]
 
 # --- LoRA Scanner ---
-def scan_lora_names() -> List[str]:
-    """Scan available LoRA files, return sorted name list (no 'None')."""
-    loras = []
+def _scan_lora_files() -> Dict[str, str]:
+    """Scan LoRA files recursively under LORA_ROOT. Returns {name: full_path}."""
+    result = {}
     if os.path.exists(LORA_ROOT):
-        for f in glob.glob(os.path.join(LORA_ROOT, "*.safetensors")):
+        for f in glob.glob(os.path.join(LORA_ROOT, "**", "*.safetensors"), recursive=True):
             name = os.path.splitext(os.path.basename(f))[0]
-            loras.append(name)
-    return sorted(loras)
+            result[name] = f
+    return result
+
+def scan_lora_names() -> List[str]:
+    """Scan available LoRA files, return sorted name list."""
+    return sorted(_scan_lora_files().keys())
+
+def resolve_lora_path(name: str) -> Optional[str]:
+    """Find full path for a LoRA by stem name, searching subdirectories."""
+    files = _scan_lora_files()
+    return files.get(name)
+
+def resolve_lora_thumbnail(name: str) -> Optional[str]:
+    """Find thumbnail (png/jpg/jpeg) for a LoRA by stem name."""
+    if os.path.exists(LORA_ROOT):
+        for ext in ("png", "jpg", "jpeg"):
+            for f in glob.glob(os.path.join(LORA_ROOT, "**", f"{name}.{ext}"), recursive=True):
+                return f
+    return None
 
 def scan_controlnets() -> List[str]:
     """Scan available ControlNet files."""
@@ -291,11 +314,23 @@ class ModelManager:
         
         available_cn = scan_controlnets()
         
+        # Available LoRAs with thumbnail info
+        available_loras = []
+        for name in scan_lora_names():
+            has_thumb = resolve_lora_thumbnail(name) is not None
+            available_loras.append({
+                "name": name.replace("_", " ").replace("-", " "),
+                "filename": name,
+                "has_thumbnail": has_thumb,
+            })
+
         return {
             "loaded_model": self.current_model_type,
             "controlnet": self.controlnet_loaded if self.controlnet_loaded else "None",
             "available_controlnets": len(available_cn) - 1,  # Exclude "None"
             "loaded_loras": list(self.loaded_loras) if self.loaded_loras else "None",
+            "loras": available_loras,
+            "controlnets": [c for c in available_cn if c != "None"],
             "ram_usage": f"{ram_percent}%",
             "gpu_memory": gpu_mem
         }
@@ -470,8 +505,12 @@ class ModelManager:
             if inpaint_image is not None:
                 inp_tensor = preprocess_image(inpaint_image, (height, width))  # [0,1]
                 if mask_image is not None:
-                    mask_t = preprocess_mask(mask_image, (height, width)) / 255.0  # [0,1]
-                    mask_keep = (1.0 - mask_t).round()
+                    # Use blurred mask if available, otherwise raw
+                    if self._blurred_mask is not None:
+                        mask_keep = 1.0 - self._blurred_mask
+                    else:
+                        mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
+                        mask_keep = (1.0 - mask_t).round()
                     inp_tensor = (inp_tensor - 0.5) * mask_keep + 0.5
             else:
                 # Dummy neutral gray inpaint image
@@ -482,11 +521,15 @@ class ModelManager:
                 inp_latent = self.vae.encode(inp_tensor).latent_dist.mode()
                 inp_latent = (inp_latent - self.vae.config.shift_factor) * self.vae.config.scaling_factor
 
-            # Mask channel: inverted (1=keep, 0=regenerate), nearest to latent res
+            # Mask channel: inverted (1=keep, 0=regenerate), downsampled to latent res
             if mask_image is not None:
-                mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
+                if self._blurred_mask is not None:
+                    mask_full = self._blurred_mask
+                else:
+                    mask_full = preprocess_mask(mask_image, (height, width)) / 255.0
                 mask_latent = F.interpolate(
-                    1.0 - mask_t, size=(ctrl_latent.shape[2], ctrl_latent.shape[3]), mode='nearest'
+                    1.0 - mask_full, size=(ctrl_latent.shape[2], ctrl_latent.shape[3]),
+                    mode='bilinear', align_corners=False
                 )
             else:
                 mask_latent = torch.zeros([1, 1, ctrl_latent.shape[2], ctrl_latent.shape[3]])
@@ -522,9 +565,9 @@ class ModelManager:
         # Lazy-load any LoRAs not yet loaded as adapters
         for name in active:
             if name not in self.loaded_loras:
-                lora_path = os.path.join(LORA_ROOT, f"{name}.safetensors")
-                if not os.path.exists(lora_path):
-                    print(f"    ⚠️ LoRA file not found: {lora_path}")
+                lora_path = resolve_lora_path(name)
+                if not lora_path:
+                    print(f"    ⚠️ LoRA file not found: {name}")
                     continue
                 try:
                     print(f"    ⏳ Loading LoRA adapter: {name}...")
@@ -687,6 +730,9 @@ class ModelManager:
         mask_image: Image.Image = None,
         seed: int = -1,
         lora_scales: Dict[str, float] = None,
+        mask_blur: int = 12,
+        denoise_strength: float = 1.0,
+        guidance_scale: float = 1.0,
     ):
         if not self.pipe:
             raise HTTPException(status_code=400, detail="No model loaded. Please load a model first.")
@@ -704,6 +750,17 @@ class ModelManager:
             generator = torch.Generator(device="cuda").manual_seed(seed)
 
         with torch.no_grad():
+            # Gaussian blur on mask for soft boundaries
+            if mask_image is not None and mask_blur > 0:
+                from torchvision.transforms.functional import gaussian_blur
+                mask_raw = preprocess_mask(mask_image, (height, width)) / 255.0  # [B,1,H,W]
+                kernel = mask_blur * 2 + 1  # must be odd
+                mask_blurred = gaussian_blur(mask_raw, kernel_size=kernel)
+                # Store for both ControlNet and RePaint paths
+                self._blurred_mask = mask_blurred
+            else:
+                self._blurred_mask = None
+
             # Activate ControlNet hooks if loaded and control image provided
             if self.controlnet_loaded and self._control_module is not None:
                 if control_image is not None:
@@ -727,39 +784,72 @@ class ModelManager:
                 "height": height,
                 "width": width,
                 "num_inference_steps": steps,
-                "guidance_scale": 1.0,
+                "guidance_scale": guidance_scale,
                 "generator": generator,
             }
 
-            # --- Inpainting ---
-            # When ControlNet is active: 33ch input already carries mask+inpaint info,
-            # the model handles inpainting natively. No callback needed.
-            # When ControlNet is NOT active: use noise-level masking callback (RePaint).
+            # --- Shared: encode original image to latent (used by img2img + inpaint) ---
+            _orig_latent = None
+            _shared_noise = None
+
+            if image is not None:
+                weight_dtype = torch.bfloat16
+                device = "cuda"
+                img_t = preprocess_image(image, (height, width))
+                img_t = (img_t * 2.0 - 1.0).to(dtype=weight_dtype, device=device)
+                _orig_latent = self.vae.encode(img_t).latent_dist.mode()
+                _orig_latent = (
+                    (_orig_latent - self.vae.config.shift_factor)
+                    * self.vae.config.scaling_factor
+                ).float()
+                _shared_noise = torch.randn(
+                    _orig_latent.shape, generator=generator, device=device, dtype=torch.float32
+                )
+
+            # img2img: start from noised original with truncated sigma schedule
+            if _orig_latent is not None and denoise_strength < 1.0:
+                self.pipe.scheduler.set_timesteps(steps)
+                full_sigmas = self.pipe.scheduler.sigmas.cpu()  # [N+1]
+                skip = int(len(full_sigmas) * (1.0 - denoise_strength))
+                skip = max(0, min(skip, len(full_sigmas) - 2))
+                truncated_sigmas = full_sigmas[skip:]
+
+                sigma_start = truncated_sigmas[0].item()
+                gen_kwargs["latents"] = sigma_start * _shared_noise + (1.0 - sigma_start) * _orig_latent
+                gen_kwargs["sigmas"] = truncated_sigmas
+                del gen_kwargs["num_inference_steps"]
+                print(f"    img2img: denoise={denoise_strength}, sigma_start={sigma_start:.3f}, "
+                      f"steps={len(truncated_sigmas)-1}/{steps}")
+
+            # --- Inpainting (RePaint callback) ---
+            # When ControlNet is active: 33ch input carries mask+inpaint → no callback needed.
+            # When ControlNet is NOT active: blend generated + re-noised original at each step.
             use_controlnet = (self._control_module is not None
                               and self._control_module._active)
 
-            if image is not None and mask_image is not None and not use_controlnet:
+            if _orig_latent is not None and mask_image is not None and not use_controlnet:
                 import torch.nn.functional as F
-                weight_dtype = torch.bfloat16
-                device = "cuda"
 
-                img_tensor = preprocess_image(image, (height, width))
-                img_tensor = (img_tensor * 2.0 - 1.0).to(dtype=weight_dtype, device=device)
-                original_latent = self.vae.encode(img_tensor).latent_dist.mode()
-                original_latent = (
-                    (original_latent - self.vae.config.shift_factor)
-                    * self.vae.config.scaling_factor
-                ).float()
+                lat_h, lat_w = _orig_latent.shape[2], _orig_latent.shape[3]
+                if self._blurred_mask is not None:
+                    mask_latent = F.interpolate(
+                        self._blurred_mask, size=(lat_h, lat_w),
+                        mode='bilinear', align_corners=False
+                    )
+                else:
+                    mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
+                    mask_latent = F.interpolate(mask_t, size=(lat_h, lat_w), mode='nearest')
+                mask_latent = mask_latent.to(device="cuda", dtype=torch.float32)
 
-                mask_t = preprocess_mask(mask_image, (height, width)) / 255.0
-                lat_h, lat_w = original_latent.shape[2], original_latent.shape[3]
-                mask_latent = F.interpolate(mask_t, size=(lat_h, lat_w), mode='nearest')
-                mask_latent = mask_latent.to(device=device, dtype=torch.float32)
+                # Only set pure noise when denoise=1.0 (img2img path didn't run)
+                if denoise_strength >= 1.0:
+                    gen_kwargs["latents"] = _shared_noise
+                # else: keep img2img's blended latents + truncated schedule
 
-                initial_noise = torch.randn(
-                    original_latent.shape, generator=generator, device=device, dtype=torch.float32
-                )
-                gen_kwargs["latents"] = initial_noise
+                # Capture for callback closure (shared noise ensures consistency)
+                _cb_noise = _shared_noise
+                _cb_orig = _orig_latent
+                _cb_mask = mask_latent
 
                 def _inpaint_callback(pipe, step_index, timestep, callback_kwargs):
                     latents = callback_kwargs["latents"]
@@ -768,15 +858,15 @@ class ModelManager:
                         sigma = pipe.scheduler.sigmas[next_idx].item()
                     else:
                         sigma = 0.0
-                    noised_orig = sigma * initial_noise + (1.0 - sigma) * original_latent
+                    noised_orig = sigma * _cb_noise + (1.0 - sigma) * _cb_orig
                     callback_kwargs["latents"] = (
-                        mask_latent * latents + (1.0 - mask_latent) * noised_orig
+                        _cb_mask * latents + (1.0 - _cb_mask) * noised_orig
                     )
                     return callback_kwargs
 
                 gen_kwargs["callback_on_step_end"] = _inpaint_callback
                 gen_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
-                print(f"    Inpainting (RePaint callback): mask {mask_latent.shape}")
+                print(f"    Inpainting (RePaint): mask={mask_latent.shape}, denoise={denoise_strength}")
 
             try:
                 result = self.pipe(**gen_kwargs)
@@ -797,9 +887,45 @@ async def lifespan(app: FastAPI):
     engine.unload_model()
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class LoadRequest(BaseModel):
     model: str
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    negative_prompt: str = ""
+    model: str = "z-image-turbo"
+    width: int = 1024
+    height: int = 1024
+    steps: int = 8
+    seed: int = -1
+    scheduler: str = "Euler"
+    guidance_scale: float = 1.0
+    mode: str = "t2i"
+    # LoRA
+    loras: Optional[List[Dict[str, float]]] = None
+    # Inpaint
+    input_image_base64: Optional[str] = None
+    mask_base64: Optional[str] = None
+    mask_blur: int = 12
+    denoise_strength: float = 1.0
+    # ControlNet
+    controlnet_type: Optional[str] = None
+    controlnet_scale: float = 0.75
+    control_image_base64: Optional[str] = None
+
+def _decode_base64_image(b64: str) -> Image.Image:
+    """Decode a base64 string to PIL Image."""
+    # Strip data URI prefix if present
+    if "," in b64[:100]:
+        b64 = b64.split(",", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(b64)))
 
 @app.get("/health")
 def health(): return {"status": "ok"}
@@ -807,8 +933,112 @@ def health(): return {"status": "ok"}
 @app.get("/status")
 def status(): return engine.get_status()
 
+from fastapi.responses import FileResponse
+
+@app.get("/lora-thumbnail/{name}")
+def lora_thumbnail(name: str):
+    """Serve LoRA thumbnail from models/LoRA/ subdirectories."""
+    safe_name = os.path.basename(name)  # prevent path traversal
+    thumb = resolve_lora_thumbnail(safe_name)
+    if thumb:
+        ext = os.path.splitext(thumb)[1].lower()
+        media = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext.lstrip("."), "image/png")
+        return FileResponse(thumb, media_type=media)
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
+
 @app.post("/load")
 def load(req: LoadRequest): return engine.load_model(req.model)
+
+import boto3
+from botocore.config import Config as BotoConfig
+
+# Cloudflare R2 config
+R2_ENDPOINT = os.getenv("R2_ENDPOINT", "")
+R2_BUCKET = os.getenv("R2_BUCKET", "vellumium-storage")
+R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY_ID", "")
+R2_SECRET_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
+R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "")
+
+_s3_client = None
+def _get_s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            "s3",
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY,
+            aws_secret_access_key=R2_SECRET_KEY,
+            config=BotoConfig(signature_version="s3v4"),
+            region_name="auto",
+        )
+    return _s3_client
+
+def _upload_to_r2(image_bytes: bytes, filename: str) -> str:
+    """Upload PNG to Cloudflare R2 and return public URL."""
+    s3 = _get_s3()
+    s3.put_object(Bucket=R2_BUCKET, Key=filename, Body=image_bytes, ContentType="image/png")
+    if R2_PUBLIC_URL:
+        return f"{R2_PUBLIC_URL}/{filename}"
+    return f"{R2_ENDPOINT}/{R2_BUCKET}/{filename}"
+
+@app.post("/api/generate")
+def api_generate(req: GenerateRequest):
+    """Generate image → upload to R2 → return URL."""
+    # Auto-load model if not loaded
+    if not engine.pipe:
+        engine.load_model(req.model)
+
+    # Decode images from base64
+    input_image = _decode_base64_image(req.input_image_base64) if req.input_image_base64 else None
+    mask_image = _decode_base64_image(req.mask_base64) if req.mask_base64 else None
+    control_image = _decode_base64_image(req.control_image_base64) if req.control_image_base64 else None
+
+    # Build LoRA scales dict: [{filename: scale}] → {filename: scale}
+    lora_scales = None
+    if req.loras:
+        lora_scales = {}
+        for entry in req.loras:
+            for k, v in entry.items():
+                lora_scales[k] = v
+
+    # ControlNet: load if needed
+    control_type = req.controlnet_type or "None"
+    if control_type != "None" and not engine.controlnet_loaded:
+        cns = scan_controlnets()
+        if cns:
+            engine.load_controlnet(os.path.join(
+                BASE_DIR, "models", "Personalized_Model", cns[0]
+            ))
+
+    # Set scheduler if specified
+    if req.scheduler and hasattr(engine, 'set_scheduler'):
+        engine.set_scheduler(req.scheduler)
+
+    # Generate
+    result_image = engine.generate(
+        prompt=req.prompt,
+        image=input_image,
+        steps=req.steps,
+        height=req.height,
+        width=req.width,
+        control_image=control_image,
+        control_type=control_type,
+        control_scale=req.controlnet_scale,
+        mask_image=mask_image,
+        seed=req.seed,
+        lora_scales=lora_scales,
+        mask_blur=req.mask_blur,
+        denoise_strength=req.denoise_strength,
+        guidance_scale=req.guidance_scale,
+    )
+
+    # Save to PNG bytes → upload to R2
+    buf = io.BytesIO()
+    result_image.save(buf, format="PNG")
+    filename = f"{uuid.uuid4().hex}.png"
+    image_url = _upload_to_r2(buf.getvalue(), filename)
+
+    return {"url": image_url, "seed": req.seed}
 
 def update_resolution(mp_preset: str, aspect_ratio: str):
     """Update resolution based on MP preset and aspect ratio."""
@@ -819,6 +1049,7 @@ def update_resolution(mp_preset: str, aspect_ratio: str):
     return 1024, 1024
 
 def gradio_interface():
+    import gradio as gr
     lora_names = scan_lora_names()
     available_cns = scan_controlnets()
     tf_models = scan_transformer_models()
@@ -915,10 +1146,19 @@ def gradio_interface():
                         gr.Markdown("### 🖌️ Inpainting")
                         input_image = gr.Image(label="Input Image", type="pil")
                         mask_image = gr.Image(label="Mask (White = regenerate)", type="pil")
+                        mask_blur_slider = gr.Slider(
+                            minimum=0, maximum=64, value=12, step=1,
+                            label="Mask Blur (경계 부드러움, 0=하드)"
+                        )
+                        denoise_strength_slider = gr.Slider(
+                            minimum=0.1, maximum=1.0, value=1.0, step=0.05,
+                            label="Denoise Strength (낮을수록 원본 유지, 1.0=완전 새로 생성)"
+                        )
                 
                 with gr.Row():
                     gen_btn = gr.Button("🚀 Generate", variant="primary", size="lg")
-                
+                    upscale_btn = gr.Button("🔍 Upscale (2x Tile)", variant="secondary", size="lg")
+
                 with gr.Row():
                     output_image = gr.Image(label="Result", type="pil")
 
@@ -954,7 +1194,8 @@ def gradio_interface():
         # Generation wrapper: collect LoRA sliders into dict
         def do_generate(prompt, image, steps, height, width,
                         control_img, ctrl_type, ctrl_scale,
-                        mask_img, seed, sched_type, *lora_values):
+                        mask_img, seed, sched_type,
+                        m_blur, d_strength, *lora_values):
             engine.set_scheduler(sched_type)
             scales = {n: v for n, v in zip(lora_names, lora_values)}
             return engine.generate(
@@ -963,6 +1204,7 @@ def gradio_interface():
                 control_image=control_img, control_type=ctrl_type,
                 control_scale=ctrl_scale, mask_image=mask_img,
                 seed=int(seed), lora_scales=scales,
+                mask_blur=int(m_blur), denoise_strength=float(d_strength),
             )
 
         gen_btn.click(
@@ -972,21 +1214,109 @@ def gradio_interface():
                 height_input, width_input, control_image, control_type,
                 control_scale, mask_image, seed_input,
                 scheduler_dropdown,
+                mask_blur_slider, denoise_strength_slider,
             ] + lora_sliders,
             outputs=output_image,
         )
-    
-    return demo
 
-app = gr.mount_gradio_app(app, gradio_interface(), path="/")
+        # Upscale: auto-load Tile ControlNet, 2x resolution, denoise_strength=0.4
+        def do_upscale(result_img, prompt, steps, seed, sched_type,
+                       *lora_values):
+            if result_img is None:
+                raise gr.Error("업스케일할 이미지가 없습니다. 먼저 Generate 하세요.")
+            if not engine.pipe:
+                raise gr.Error("모델이 로드되지 않았습니다.")
+
+            # Auto-load Tile ControlNet (prefer full > lite)
+            cn_models = get_controlnet_models()
+            tile_name = None
+            for name in cn_models:
+                if "Tile" in name and "lite" not in name.lower():
+                    tile_name = name
+                    break
+            if tile_name is None:
+                for name in cn_models:
+                    if "Tile" in name:
+                        tile_name = name
+                        break
+            if tile_name is None:
+                raise gr.Error("Tile ControlNet 모델이 없습니다. models/Personalized_Model/ 확인")
+
+            # Save previous ControlNet to restore after upscale
+            prev_cn = engine.controlnet_loaded
+
+            if engine.controlnet_loaded != tile_name:
+                print(f"    Upscale: auto-loading Tile ControlNet ({tile_name})")
+                engine.load_controlnet(tile_name)
+
+            # Calculate 2x resolution (capped at 2MP limits)
+            src_w, src_h = result_img.size
+            scale = min(2.0, (2_000_000 / (src_w * src_h)) ** 0.5)
+            tgt_h = int(src_h * scale) // 16 * 16  # align to 16
+            tgt_w = int(src_w * scale) // 16 * 16
+            tgt_h = min(tgt_h, 1920)
+            tgt_w = min(tgt_w, 1920)
+            print(f"    Upscale: {src_w}x{src_h} → {tgt_w}x{tgt_h}")
+
+            engine.set_scheduler(sched_type)
+            scales = {n: v for n, v in zip(lora_names, lora_values)}
+
+            # Official Tile upscale approach:
+            # - Pure t2i (no img2img / denoise_strength)
+            # - guidance_scale=0.0, control_scale=0.85
+            # - Dummy mask (all white=255) + zero inpaint for 33ch ControlNet input
+            from PIL import Image as PILImage
+            dummy_mask = PILImage.new("L", (tgt_w, tgt_h), 255)  # all white
+            dummy_inpaint = PILImage.new("RGB", (tgt_w, tgt_h), (0, 0, 0))  # all black/zeros
+
+            result = engine.generate(
+                prompt=prompt, steps=int(steps),
+                height=tgt_h, width=tgt_w,
+                control_image=result_img, control_type="None",
+                control_scale=0.85,
+                mask_image=dummy_mask,
+                image=dummy_inpaint,
+                seed=int(seed), lora_scales=scales,
+                guidance_scale=0.0,
+                mask_blur=0,
+            )
+
+            # Restore previous ControlNet
+            if prev_cn and prev_cn != tile_name:
+                print(f"    Upscale: restoring ControlNet ({prev_cn})")
+                engine.load_controlnet(prev_cn)
+            elif not prev_cn:
+                engine.load_controlnet("None")
+
+            return result
+
+        upscale_btn.click(
+            fn=do_upscale,
+            inputs=[
+                output_image, prompt_input, steps_slider,
+                seed_input, scheduler_dropdown,
+            ] + lora_sliders,
+            outputs=output_image,
+        )
+
+    return demo
 
 if __name__ == "__main__":
     import uvicorn
+
+    api_only = "--api-only" in sys.argv
+
+    if not api_only:
+        import gradio as gr
+        app = gr.mount_gradio_app(app, gradio_interface(), path="/")
+
+    mode = "API-only" if api_only else "Gradio + API"
     print("\n" + "="*60)
-    print("  🚀 Z-Image Turbo Engine Starting...")
+    print(f"  🚀 Z-Image Turbo Engine ({mode})")
     print("  📌 Access URL: http://localhost:7860")
+    print("  📡 POST /api/generate — direct generation endpoint")
     print("  ⚡ 8-step distilled | CFG=1.0 | shift=3.0 | res_multistep")
-    print("  🎛️ ControlNet Union/Tile, LoRA, Resolution Presets")
-    print("  📁 ControlNet 위치: models/Personalized_Model/")
+    if not api_only:
+        print("  🎛️ ControlNet Union/Tile, LoRA, Resolution Presets")
     print("="*60 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=7860)

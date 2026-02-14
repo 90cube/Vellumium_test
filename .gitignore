@@ -21,6 +21,9 @@ Logo/
 # Reference documentation & guides
 zimagebase/
 Qwen_image_edit_2511/
+
+# Qwen Image Edit - large model files
+Qwen-Image-Edit-2511-FP8/
 zimageturbo/Z-Image-Turbo-Fun-Controlnet-Union-2.1*.md
 zimageturbo/Z-Image ControlNet.json
 
@@ -38,3 +41,18 @@ zimageturbo/asset/
 
 # Backup files
 zimageturbo/requirements_backup.txt
+
+# Portfolio (private dev log)
+포트폴리오/
+
+# MCP config (contains secrets)
+.mcp.json
+
+# Local secrets
+.env.local
+secrets.txt
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
